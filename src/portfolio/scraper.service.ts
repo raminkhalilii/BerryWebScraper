@@ -32,68 +32,107 @@ export class ScraperService {
         timeout: 60000,
       });
 
-      this.logger.log('Waiting for portfolio data to load...');
-      // Wait for table rows to appear
-      await page.waitForSelector('table tr td', { timeout: 30000 });
+      const allCompanies: PortfolioCompany[] = [];
+      let pageNumber = 1;
 
-      this.logger.log('Extracting company data...');
-      const companies = await page.evaluate(() => {
-        const results: {
-          name: string;
-          assetClass: string;
-          industry: string;
-          region: string;
-          extraData?: Record<string, string>;
-        }[] = [];
+      while (true) {
+        this.logger.log(`Waiting for portfolio data to load on page ${pageNumber}...`);
+        // Wait for table rows to appear
+        await page.waitForSelector('table tr td', { timeout: 30000 });
 
-        // Select all table rows
-        const rows = Array.from(document.querySelectorAll('table tr'));
+        this.logger.log(`Extracting company data from page ${pageNumber}...`);
+        const currentBatch = await page.evaluate(() => {
+          const results: {
+            name: string;
+            assetClass: string;
+            industry: string;
+            region: string;
+            extraData?: Record<string, string>;
+          }[] = [];
 
-        rows.forEach((row) => {
-          const cells = Array.from(row.querySelectorAll('td'));
+          // Select all table rows
+          const rows = Array.from(document.querySelectorAll('table tr'));
 
-          // Skip if not enough cells or if it's a header row (often uses <th> but sometimes <td>)
-          if (cells.length < 4) return;
+          rows.forEach((row) => {
+            const cells = Array.from(row.querySelectorAll('td'));
 
-          const name = cells[0]?.textContent?.trim() || '';
-          const assetClass = cells[1]?.textContent?.trim() || '';
-          const industry = cells[2]?.textContent?.trim() || '';
-          const region = cells[3]?.textContent?.trim() || '';
+            // Skip if not enough cells or if it's a header row (often uses <th> but sometimes <td>)
+            if (cells.length < 4) return;
 
-          // Skip header row by checking content
-          if (name.toLowerCase() === 'company' || name.toLowerCase() === 'name') return;
-          if (!name) return;
+            const name = cells[0]?.textContent?.trim() || '';
+            const assetClass = cells[1]?.textContent?.trim() || '';
+            const industry = cells[2]?.textContent?.trim() || '';
+            const region = cells[3]?.textContent?.trim() || '';
 
-          const extraData: Record<string, string> = {};
-          // Collect any additional columns beyond the 4th
-          if (cells.length > 4) {
-            cells.slice(4).forEach((cell, index) => {
-              const text = cell.textContent?.trim();
-              if (text) {
-                extraData[`column_${index + 5}`] = text;
-              }
+            // Skip header row by checking content
+            if (name.toLowerCase() === 'company' || name.toLowerCase() === 'name') return;
+            if (!name) return;
+
+            const extraData: Record<string, string> = {};
+            // Collect any additional columns beyond the 4th
+            if (cells.length > 4) {
+              cells.slice(4).forEach((cell, index) => {
+                const text = cell.textContent?.trim();
+                if (text) {
+                  extraData[`column_${index + 5}`] = text;
+                }
+              });
+            }
+
+            results.push({
+              name,
+              assetClass: assetClass || 'N/A',
+              industry,
+              region,
+              extraData: Object.keys(extraData).length > 0 ? extraData : undefined,
             });
-          }
-
-          results.push({
-            name,
-            assetClass: assetClass || 'N/A',
-            industry,
-            region,
-            extraData: Object.keys(extraData).length > 0 ? extraData : undefined,
           });
+
+          return results;
         });
 
-        return results;
-      });
+        allCompanies.push(...(currentBatch as PortfolioCompany[]));
+        this.logger.log(`Scraping page ${pageNumber} - Found ${currentBatch.length} companies`);
 
-      this.logger.log(`Found ${companies.length} companies.`);
+        // Handle Pagination
+        const nextButtonSelector = '[aria-label="pagination arrow right"]';
+        const nextButton = await page.$(nextButtonSelector);
+
+        if (nextButton) {
+          const isDisabled = await page.evaluate((el) => {
+            return el.hasAttribute('disabled') || el.classList.contains('disabled');
+          }, nextButton);
+
+          if (!isDisabled) {
+            this.logger.log('Clicking next page...');
+            await nextButton.click();
+
+            // Wait for Load
+            try {
+              await page.waitForNetworkIdle({ timeout: 5000 });
+            } catch {
+              this.logger.warn('Wait for network idle timed out, using fallback timeout');
+              await new Promise((resolve) => setTimeout(resolve, 2000));
+            }
+
+            pageNumber++;
+          } else {
+            this.logger.log('Next button is disabled. Reached the last page.');
+            break;
+          }
+        } else {
+          this.logger.log('Next button not found. Reached the last page or no pagination.');
+          break;
+        }
+      }
+
+      this.logger.log(`Found a total of ${allCompanies.length} companies.`);
 
       // Save companies to database
-      await this.saveCompanies(companies as PortfolioCompany[]);
+      await this.saveCompanies(allCompanies);
 
       this.logger.log('Scraping complete.');
-      return companies as PortfolioCompany[];
+      return allCompanies;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.logger.error(`Error during scraping: ${errorMessage}`);
@@ -103,15 +142,17 @@ export class ScraperService {
     }
   }
 
-  private async saveCompanies(companies: PortfolioCompany[]): Promise<void> {
+  public async saveCompanies(companies: PortfolioCompany[]): Promise<void> {
     this.logger.log(`Saving ${companies.length} companies to database...`);
     try {
       for (const company of companies) {
-        await this.companyModel.findOneAndUpdate({ name: company.name }, company, {
-          upsert: true,
-          new: true,
-          setDefaultsOnInsert: true,
-        });
+        await this.companyModel
+          .findOneAndUpdate({ name: company.name }, company, {
+            upsert: true,
+            new: true,
+            setDefaultsOnInsert: true,
+          })
+          .exec();
       }
       this.logger.log('Database update complete.');
     } catch (error) {
