@@ -33,15 +33,26 @@ export class ScraperService {
       });
 
       const allCompanies: PortfolioCompany[] = [];
-      let pageNumber = 1;
+      let currentPageIndex = 1;
 
       while (true) {
-        this.logger.log(`Waiting for portfolio data to load on page ${pageNumber}...`);
-        // Wait for table rows to appear
-        await page.waitForSelector('table tr td', { timeout: 30000 });
+        // Step 1: Wait for the specific page index to appear
+        this.logger.log(`Waiting for rows with data-search-page-index="${currentPageIndex}"...`);
+        try {
+          await page.waitForSelector(`tr[data-search-page-index="${currentPageIndex}"]`, {
+            timeout: 10000,
+          });
+        } catch {
+          this.logger.warn(
+            `Timeout waiting for page index ${currentPageIndex}. Assuming end of pagination.`,
+          );
+          break;
+        }
 
-        this.logger.log(`Extracting company data from page ${pageNumber}...`);
-        const currentBatch = await page.evaluate(() => {
+        // Step 2: Scrape only rows for the current page index
+        this.logger.log(`Extracting company data for page ${currentPageIndex}...`);
+        const rowSelector = `tr[data-search-page-index="${currentPageIndex}"]`;
+        const currentBatch = await page.evaluate((selector) => {
           const results: {
             name: string;
             assetClass: string;
@@ -50,13 +61,11 @@ export class ScraperService {
             extraData?: Record<string, string>;
           }[] = [];
 
-          // Select all table rows
-          const rows = Array.from(document.querySelectorAll('table tr'));
+          const rows = Array.from(document.querySelectorAll(selector));
 
           rows.forEach((row) => {
             const cells = Array.from(row.querySelectorAll('td'));
 
-            // Skip if not enough cells or if it's a header row (often uses <th> but sometimes <td>)
             if (cells.length < 4) return;
 
             const name = cells[0]?.textContent?.trim() || '';
@@ -64,12 +73,10 @@ export class ScraperService {
             const industry = cells[2]?.textContent?.trim() || '';
             const region = cells[3]?.textContent?.trim() || '';
 
-            // Skip header row by checking content
             if (name.toLowerCase() === 'company' || name.toLowerCase() === 'name') return;
             if (!name) return;
 
             const extraData: Record<string, string> = {};
-            // Collect any additional columns beyond the 4th
             if (cells.length > 4) {
               cells.slice(4).forEach((cell, index) => {
                 const text = cell.textContent?.trim();
@@ -89,41 +96,33 @@ export class ScraperService {
           });
 
           return results;
-        });
+        }, rowSelector);
 
         allCompanies.push(...(currentBatch as PortfolioCompany[]));
-        this.logger.log(`Scraping page ${pageNumber} - Found ${currentBatch.length} companies`);
+        this.logger.log(`Scraped Page ${currentPageIndex} (${currentBatch.length} companies)`);
 
-        // Handle Pagination
-        const nextButtonSelector = '[aria-label="pagination arrow right"]';
-        const nextButton = await page.$(nextButtonSelector);
-
-        if (nextButton) {
-          const isDisabled = await page.evaluate((el) => {
-            return el.hasAttribute('disabled') || el.classList.contains('disabled');
-          }, nextButton);
-
-          if (!isDisabled) {
-            this.logger.log('Clicking next page...');
-            await nextButton.click();
-
-            // Wait for Load
-            try {
-              await page.waitForNetworkIdle({ timeout: 5000 });
-            } catch {
-              this.logger.warn('Wait for network idle timed out, using fallback timeout');
-              await new Promise((resolve) => setTimeout(resolve, 2000));
-            }
-
-            pageNumber++;
-          } else {
-            this.logger.log('Next button is disabled. Reached the last page.');
-            break;
-          }
-        } else {
-          this.logger.log('Next button not found. Reached the last page or no pagination.');
+        // Step 3: Click parent <span> of the SVG next arrow
+        const nextArrowSvg = await page.$('[aria-label="pagination arrow right"]');
+        if (!nextArrowSvg) {
+          this.logger.log('Next arrow SVG not found. Reached the last page or no pagination.');
           break;
         }
+
+        this.logger.log('Clicking next page via parent <span>...');
+        try {
+          await page.evaluate((el) => {
+            if (el && el.parentElement && el.parentElement instanceof HTMLElement) {
+              el.parentElement.click();
+            }
+          }, nextArrowSvg);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.warn(`Failed to click next page parent span: ${msg}`);
+          break;
+        }
+
+        // No waiting here; next loop waits for the new page index
+        currentPageIndex++;
       }
 
       this.logger.log(`Found a total of ${allCompanies.length} companies.`);
