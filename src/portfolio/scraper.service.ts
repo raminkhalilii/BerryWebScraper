@@ -19,10 +19,18 @@ export class ScraperService {
 
   async scrapeKKR(): Promise<PortfolioCompany[]> {
     this.logger.log('Launching browser...');
+    console.log('Using executable path: ' + (process.env.PUPPETEER_EXECUTABLE_PATH || 'bundled'));
     const browser = await puppeteer.launch({
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+      ],
     });
 
     try {
@@ -53,54 +61,133 @@ export class ScraperService {
         // Step 2: Scrape only rows for the current page index
         this.logger.log(`Extracting company data for page ${currentPageIndex}...`);
         const rowSelector = `tr[data-search-page-index="${currentPageIndex}"]`;
-        const currentBatch = await page.evaluate((selector) => {
-          const results: {
-            name: string;
-            assetClass: string;
-            industry: string;
-            region: string;
-            extraData?: Record<string, string>;
-          }[] = [];
 
-          const rows = Array.from(document.querySelectorAll(selector));
+        const rowHandles = await page.$$(rowSelector);
+        let scrapedOnThisPage = 0;
 
-          rows.forEach((row) => {
-            const cells = Array.from(row.querySelectorAll('td'));
+        for (const rowHandle of rowHandles) {
+          try {
+            // Extract basic info from the row first
+            const basicInfo = await page.evaluate((row) => {
+              const cells = Array.from(row.querySelectorAll('td'));
+              if (cells.length < 4) return null;
 
-            if (cells.length < 4) return;
+              const name = cells[0]?.textContent?.trim() || '';
+              const assetClass = cells[1]?.textContent?.trim() || '';
+              const industry = cells[2]?.textContent?.trim() || '';
+              const region = cells[3]?.textContent?.trim() || '';
 
-            const name = cells[0]?.textContent?.trim() || '';
-            const assetClass = cells[1]?.textContent?.trim() || '';
-            const industry = cells[2]?.textContent?.trim() || '';
-            const region = cells[3]?.textContent?.trim() || '';
+              if (name.toLowerCase() === 'company' || name.toLowerCase() === 'name' || !name)
+                return null;
 
-            if (name.toLowerCase() === 'company' || name.toLowerCase() === 'name') return;
-            if (!name) return;
+              const extraData: Record<string, string> = {};
+              if (cells.length > 4) {
+                cells.slice(4).forEach((cell, index) => {
+                  const text = cell.textContent?.trim();
+                  if (text) {
+                    extraData[`column_${index + 5}`] = text;
+                  }
+                });
+              }
 
-            const extraData: Record<string, string> = {};
-            if (cells.length > 4) {
-              cells.slice(4).forEach((cell, index) => {
-                const text = cell.textContent?.trim();
-                if (text) {
-                  extraData[`column_${index + 5}`] = text;
+              return {
+                name,
+                assetClass: assetClass || 'N/A',
+                industry,
+                region,
+                extraData: Object.keys(extraData).length > 0 ? extraData : undefined,
+              };
+            }, rowHandle);
+
+            if (!basicInfo) continue;
+
+            // Step A (Click): Click the current row to open flyout
+            await page.evaluate((el) => (el as HTMLElement).click(), rowHandle);
+
+            // Step B (Wait for Flyout)
+            await page.waitForSelector('.cmp-portfolio-filter__flyout.show', {
+              timeout: 3000,
+            });
+
+            // Step C (Extract Details)
+            const flyoutDetails = await page.evaluate(() => {
+              const flyout = document.querySelector('.cmp-portfolio-filter__flyout.show');
+              if (!flyout) return null;
+
+              // Description: Select .cmp-portfolio-filter__portfolio-description p and get its innerText
+              const descriptionEl = flyout.querySelector(
+                '.cmp-portfolio-filter__portfolio-description p',
+              );
+              const description = descriptionEl
+                ? (descriptionEl as HTMLElement).innerText.trim()
+                : '';
+
+              // General Details (Website)
+              let website = '';
+              const generalDetailsDivs = Array.from(
+                flyout.querySelectorAll('.cmp-portfolio-filter__general-details > div'),
+              );
+
+              generalDetailsDivs.forEach((div) => {
+                // Website: Check if the div contains an <a> tag with an href
+                const anchor = div.querySelector('a[href]');
+                if (anchor) {
+                  website = (anchor as HTMLAnchorElement).href;
                 }
               });
-            }
 
-            results.push({
-              name,
-              assetClass: assetClass || 'N/A',
-              industry,
-              region,
-              extraData: Object.keys(extraData).length > 0 ? extraData : undefined,
+              // Headquarters: Look for specific selector .cmp-portfolio-filter__flyout-body .sub-desc
+              const hqEl = flyout.querySelector('.cmp-portfolio-filter__flyout-body .sub-desc');
+              let headquarters = hqEl ? (hqEl as HTMLElement).innerText.trim() : '';
+
+              if (headquarters) {
+                // Remove labels like "Headquarters:" or "HQ:"
+                headquarters = headquarters.replace(/^(Headquarters|HQ):?\s*/i, '').trim();
+              }
+
+              return { headquarters, website, description };
             });
-          });
 
-          return results;
-        }, rowSelector);
+            const finalCompany: PortfolioCompany = {
+              ...basicInfo,
+              ...(flyoutDetails || {}),
+            };
 
-        allCompanies.push(...(currentBatch as PortfolioCompany[]));
-        this.logger.log(`Scraped Page ${currentPageIndex} (${currentBatch.length} companies)`);
+            allCompanies.push(finalCompany);
+            scrapedOnThisPage++;
+
+            // Step D (Close Flyout)
+            await page.keyboard.press('Escape');
+            // Wait for Close
+            await page.waitForSelector('cmp-portfolio-filter__flyout-body', {
+              hidden: true,
+              timeout: 3000,
+            });
+
+            // Wait for Table: Optional safety step
+            await page
+              .waitForSelector('tr[data-search-page-index]', {
+                timeout: 1000,
+              })
+              .catch(() => {});
+          } catch (err) {
+            const companyName = await rowHandle
+              .$eval('td:first-child', (el) => el.textContent?.trim())
+              .catch(() => 'Unknown');
+            this.logger.warn(
+              `Skipping details for ${companyName}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+
+            // Try to close flyout just in case it's stuck open
+            await page.keyboard.press('Escape').catch(() => {});
+            // Small delay to allow UI to settle
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        }
+
+        this.logger.log(`Scraped Page ${currentPageIndex} (${scrapedOnThisPage} companies)`);
 
         // Step 3: Click parent <span> of the SVG next arrow
         const nextArrowSvg = await page.$('[aria-label="pagination arrow right"]');

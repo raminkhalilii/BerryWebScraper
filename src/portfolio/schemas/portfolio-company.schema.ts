@@ -31,6 +31,30 @@ export class PortfolioCompany {
   region?: string;
 
   @ApiProperty({
+    example: 'New York, NY',
+    description: 'Headquarters of the company',
+    required: false,
+  })
+  @Prop()
+  headquarters?: string;
+
+  @ApiProperty({
+    example: 'https://www.example.com',
+    description: 'Company website',
+    required: false,
+  })
+  @Prop()
+  website?: string;
+
+  @ApiProperty({
+    example: 'A leading provider of technology solutions.',
+    description: 'Company description',
+    required: false,
+  })
+  @Prop()
+  description?: string;
+
+  @ApiProperty({
     example: { website: 'https://www.1800contacts.com' },
     description: 'Additional data',
     required: false,
