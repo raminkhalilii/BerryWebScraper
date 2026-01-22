@@ -16,6 +16,13 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# Install Chromium for Puppeteer runtime
+RUN apk add --no-cache chromium
+
+# Environment variables to use system Chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+
 # Copy built assets and node_modules from builder
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules

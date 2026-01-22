@@ -20,6 +20,7 @@ export class ScraperService {
   async scrapeKKR(): Promise<PortfolioCompany[]> {
     this.logger.log('Launching browser...');
     const browser = await puppeteer.launch({
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
