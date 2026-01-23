@@ -47,3 +47,6 @@ jobs:
           context: .
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/berry-scraper:latest
+
+      - name: Trigger Render Deployment
+        run: curl "${{ secrets.RENDER_DEPLOY_HOOK }}"
