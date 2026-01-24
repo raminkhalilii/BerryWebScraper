@@ -1,12 +1,14 @@
-import { Controller, Get } from '@nestjs/common';
-import { AppService } from './app.service';
+import { Controller, Get, Redirect } from '@nestjs/common';
 
 @Controller()
 export class AppController {
-  constructor(private readonly appService: AppService) {}
-
+  // Root endpoint: redirect users to Swagger UI and provide a friendly message when invoked directly
   @Get()
-  getHello(): string {
-    return this.appService.getHello();
+  @Redirect('/api')
+  root(): { message: string } {
+    return {
+      message:
+        'Welcome to the Berry KKR Scraper API. Please visit /api to view the Swagger documentation and interact with the endpoints.',
+    };
   }
 }
